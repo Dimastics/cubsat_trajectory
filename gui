@@ -1,0 +1,153 @@
+import sys
+import requests
+from datetime import datetime, timedelta, timezone
+from PyQt5.QtCore import QUrl, QTimer
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QLineEdit, QPushButton, QTextEdit
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
+
+from sunpy.net import Fido, attrs as a
+from sunpy.timeseries import TimeSeries
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+class MplCanvas(FigureCanvas):
+    def __init__(self, parent=None, width=5, height=4, dpi=100):
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        self.axes = fig.add_subplot(111)
+        super(MplCanvas, self).__init__(fig)
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Solar Flare Activity Integration")
+
+        # Создаем виджет для карты
+        self.webView = QWebEngineView()
+        self.webView.setUrl(QUrl('file:///C:/users/nodmi/PycharmProjects/pythonProject/filehere/realtime_map.html'))
+        self.webView.settings().setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, True)
+        self.webView.settings().setAttribute(QWebEngineSettings.LocalStorageEnabled, True)
+
+        # Создаем текстовое поле для погоды
+        self.weatherText = QTextEdit()
+        self.weatherText.setFixedHeight(60)
+        self.weatherText.setReadOnly(True)
+        self.weatherText.setText("Получаем данные о погоде...")
+
+        # Создаем кнопку "Рассчитать"
+        self.calcButton = QPushButton("Рассчитать")
+        self.calcButton.clicked.connect(self.calculate)
+
+        # Создаем текстовое поле для результата
+        self.resultText = QLineEdit()
+        self.resultText.setReadOnly(True)
+        self.resultText.setText("")
+
+        # Создаем график для отображения солнечной активности
+        self.solarCanvas = MplCanvas(self, width=5, height=4, dpi=100)
+
+        # Создаем макет
+        layout = QVBoxLayout()
+        layout.addWidget(self.webView)
+        layout.addWidget(self.weatherText)
+        layout.addWidget(self.calcButton)
+        layout.addWidget(self.resultText)
+        layout.addWidget(self.solarCanvas)
+
+        container = QWidget()
+        container.setLayout(layout)
+        self.setCentralWidget(container)
+
+        self.webView.loadFinished.connect(self.on_load_finished)
+
+        # Создаем таймер для обновления данных каждые 10 минут (600000 миллисекунд)
+        self.updateTimer = QTimer(self)
+        self.updateTimer.timeout.connect(self.update_data)
+        self.updateTimer.start(600000)  # Обновление каждые 10 минут
+
+        # Первый запрос данных при запуске
+        self.update_data()
+
+    def on_load_finished(self, ok):
+        if ok:
+            print("Page loaded successfully")
+        else:
+            print("Failed to load page")
+
+    def calculate(self):
+        current_activity = self.resultText.text()
+        if current_activity == "Вспышки на солнце обнаружены":
+            self.resultText.setText("не работаем")
+        elif current_activity == "Вспышек на солнце не обнаружено":
+            self.resultText.setText("работаем")
+
+    def update_data(self):
+        self.update_weather()
+        self.update_solar_activity()
+
+    def update_weather(self):
+        api_key = '1fd8c57e450f9395348d65b73035a48c'  # Замените на ваш действительный API ключ
+        lat = 40.7128  # Широта для Нью-Йорка, замените на ваши координаты
+        lon = -74.0060  # Долгота для Нью-Йорка, замените на ваши координаты
+        url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric&lang=ru"
+        print(f"Fetching weather data from: {url}")
+
+        try:
+            response = requests.get(url)
+            print(f"Response status code: {response.status_code}")
+            data = response.json()
+            print(f"Response data: {data}")
+
+            if response.status_code == 200 and 'weather' in data and 'main' in data:
+                weather_description = data['weather'][0]['description']
+                temp = data['main']['temp']
+                weather_text = f"Погода: {weather_description}, Температура: {temp}°C"
+                self.weatherText.setText(weather_text)
+            else:
+                self.weatherText.setText("Нет данных о погоде")
+        except Exception as e:
+            self.weatherText.setText(f"Ошибка при получении данных о погоде: {e}")
+
+    def update_solar_activity(self):
+        # Используем SunPy для получения данных о солнечной активности
+        start_time = datetime(2024, 4, 1, tzinfo=timezone.utc)
+        end_time = datetime.now(timezone.utc)
+
+        try:
+            # Поиск данных о солнечных вспышках
+            result = Fido.search(a.Time(start_time, end_time), a.Instrument('XRS'))
+            print(f"Search result: {result}")
+            if len(result[0]) > 0:
+                files = Fido.fetch(result)
+                print(f"Fetched files: {files}")
+                if files:
+                    # Убедимся, что файлы корректно загружены и преобразуются
+                    ts_list = [TimeSeries(f) for f in files]
+                    for ts in ts_list:
+                        flares = ts.to_dataframe()
+                        print(f"Flares data: {flares}")
+                        if not flares.empty:
+                            self.resultText.setText("Вспышки на солнце обнаружены")
+                            break
+                    else:
+                        self.resultText.setText("Вспышек на солнце не обнаружено")
+
+                    # Обновление графика
+                    self.solarCanvas.axes.clear()
+                    for ts in ts_list:
+                        flares = ts.to_dataframe()
+                        self.solarCanvas.axes.plot(flares.index, flares['xrsa'], 'ro')  # Отображение точек вспышек
+                    self.solarCanvas.axes.set_xlabel('Date')
+                    self.solarCanvas.axes.set_ylabel('X-ray flux (A)')
+                    self.solarCanvas.draw()
+            else:
+                self.resultText.setText("Вспышек на солнце не обнаружено")
+        except Exception as e:
+            self.resultText.setText(f"Ошибка при получении данных: {e}")
+            print(f"Exception: {e}")
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
